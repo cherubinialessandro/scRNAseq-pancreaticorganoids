@@ -1,0 +1,243 @@
+# DESCRIPTION ####
+# The purpose of this code is to setup+normalize+threshold data, as a Seurat object, data set integration and clustering.
+
+# LOAD LIBRARIES ####
+library(ggplot2)
+library(cowplot)
+library(Matrix)
+library(ggridges)
+library(ggrepel)
+library(dplyr)
+library(Seurat)
+library(Rcpp)
+library(fgsea)
+library(ggpubr)
+library(tidyverse)
+library(readr)
+# Then set the path to the relevant folders
+RData_dir <- "F:/Organoids/rdata/"
+reports_dir <- "F:/Organoids/reports/"
+data_processed_dir <- "F:/Organoids/processed/"
+figure_dir <- "F:/Organoids/figures/"
+# Finally set options if needed
+options(ggrepel.max.overlaps = Inf)
+options(future.globals.maxSize = 4000 * 1024^2)
+
+
+# ------------------------------ #
+# DATA LOADING
+# ------------------------------ #
+HPO1.data <- read.table(file.choose(), header = T, row.names=1, sep="", as.is=T)
+HPO1 <- CreateSeuratObject(counts = HPO1.data, 
+                           project = "HPO1"
+)
+HPO2.data <- read.table(file.choose(), header = T, row.names=1, sep="", as.is=T)
+HPO2 <- CreateSeuratObject(counts = HPO2.data,
+                           project = "HPO2"
+)
+HPO3.data <- read.table(file.choose(), header = T, row.names=1, sep="", as.is=T)
+HPO3 <- CreateSeuratObject(counts = HPO3.data,
+                           project = "HPO3"
+)
+# Adding Cell ids ####
+HPO1 <- RenameCells(object = HPO1, add.cell.id = "HPO1")
+head(x = colnames(x = HPO1))
+HPO2 <- RenameCells(object = HPO2, add.cell.id = "HPO2")
+head(x = colnames(x = HPO2))
+HPO3 <- RenameCells(object = HPO3, add.cell.id = "HPO3")
+head(x = colnames(x = HPO3))
+# Create a organoid-list ####
+hpon3_list <- c(HPO1, HPO2, HPO3)
+hpon3_names <- c("HPO1", "HPO2", "HPO3")
+
+
+# ------------------------------ #
+# PRE-PROCESSING
+# ------------------------------ #
+# The [[ operator can add columns to object metadata. Here we store MT percentages for each cell
+print('QC metrics, before any data manipulation :')
+for (i in 1:length(hpon3_list)) {
+  hpon3_list[[i]][["percent.mt"]] <- PercentageFeatureSet(hpon3_list[[i]], pattern = "^MT-")
+  print(paste(hpon3_names[[i]], ': ',  'nCells = ', as.numeric(table(hpon3_list[[i]]$orig.ident)), ' | nFeatures = ', format(round(mean(hpon3_list[[i]]$nFeature_RNA), digits = 2), nsmall = 2), ' | nCount = ', format(round(mean(hpon3_list[[i]]$nCount_RNA), digits = 2), nsmall = 2), ' | %MT = ', format(round(mean(hpon3_list[[i]]$percent.mt), digits = 2), nsmall = 2), sep = ''))
+  p1 <- VlnPlot(hpon3_list[[i]], features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), pt.size = 0.1, ncol = 5)
+  p1 > ggsave(filename = paste(figure_dir, "1_", hpon3_names[[i]], "_hpon3_QC_metrics_before.png", sep=""), width = 250, height = 150, units = "mm")
+}
+# Store and save these values in a dataframe
+tmp_df <- data.frame("orig.ident" = c(0), "n.cells" = c(0), "n.features" = c(0), "n.count" = c(0), "percent.mt" = c(0))
+for (i in 1:length(hpon3_list)) {
+  tmp_df[i, "orig.ident"] <- hpon3_names[[i]]
+  tmp_df[i, "n.cells"] <- as.numeric(table(hpon3_list[[i]]$orig.ident))
+  tmp_df[i, "n.features"] <- format(round(mean(hpon3_list[[i]]$nFeature_RNA), digits = 2), nsmall = 2)
+  tmp_df[i, "n.count"] <- format(round(mean(hpon3_list[[i]]$nCount_RNA), digits = 2), nsmall = 2)
+  tmp_df[i, "percent.mt"] <- format(round(mean(hpon3_list[[i]]$percent.mt), digits = 2), nsmall = 2)
+}
+write.table(tmp_df, paste(reports_dir, "1_hpon3_list_SampleMetrics_BeforeFiltering.csv", sep=""), sep=",") # export sample characteristics as a table
+# Thresholds settings for snRNA-seq samples: percent.mt < 5% 
+tmp_df <- data.frame("techno.ident" = c(0), "batch.ident" = c(0), "orig.ident" = c(0), "n.cells" = c(0), "n.features" = c(0), "n.count" = c(0), "percent.mt" = c(0), "percent.ribo" = c(0))
+for (i in 1:length(hpon3_list)) {
+  hpon3_list[[i]] <- subset(hpon3_list[[i]], subset = nFeature_RNA > 200 & nFeature_RNA < 5000 & percent.mt < 15)
+  print(paste(hpon3_names[[i]], ': ',  'nCells = ', as.numeric(table(hpon3_list[[i]]$orig.ident)), ' | nFeatures = ', format(round(mean(hpon3_list[[i]]$nFeature_RNA), digits = 2), nsmall = 2), ' | nCount = ', format(round(mean(hpon3_list[[i]]$nCount_RNA), digits = 2), nsmall = 2), ' | %MT = ', format(round(mean(hpon3_list[[i]]$percent.mt), digits = 2), nsmall = 2), ' | %RPL = ', format(round(mean(hpon3_list[[i]]$percent.rpl), digits = 2), nsmall = 2), ' | %RPS = ', format(round(mean(hpon3_list[[i]]$percent.rps), digits = 2), nsmall = 2), sep = ''))
+  tmp_df[i, "orig.ident"] <- hpon3_names[[i]]
+  tmp_df[i, "n.cells"] <- as.numeric(table(hpon3_list[[i]]$orig.ident))
+  tmp_df[i, "n.features"] <- format(round(mean(hpon3_list[[i]]$nFeature_RNA), digits = 2), nsmall = 2)
+  tmp_df[i, "n.count"] <- format(round(mean(hpon3_list[[i]]$nCount_RNA), digits = 2), nsmall = 2)
+  tmp_df[i, "percent.mt"] <- format(round(mean(hpon3_list[[i]]$percent.mt), digits = 2), nsmall = 2)
+}
+write.table(tmp_df, paste(reports_dir, "1_hpon3_list_SampleMetrics_AfterFiltering.csv", sep=""), sep=",") # export sample characteristics as a table
+print('QC metrics, after data manipulation :')
+for (i in 1:length(hpon3_list)) {
+  hpon3_list[[i]][["percent.mt"]] <- PercentageFeatureSet(hpon3_list[[i]], pattern = "^MT-")
+  print(paste(hpon3_names[[i]], ': ',  'nCells = ', as.numeric(table(hpon3_list[[i]]$orig.ident)), ' | nFeatures = ', format(round(mean(hpon3_list[[i]]$nFeature_RNA), digits = 2), nsmall = 2), ' | nCount = ', format(round(mean(hpon3_list[[i]]$nCount_RNA), digits = 2), nsmall = 2), ' | %MT = ', format(round(mean(hpon3_list[[i]]$percent.mt), digits = 2), nsmall = 2), sep = ''))
+  p1 <- VlnPlot(hpon3_list[[i]], features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), pt.size = 0.1, ncol = 5)
+  p1 > ggsave(filename = paste(figure_dir, "1_", hpon3_names[[i]], "_hpon3_QC_metrics_after.png", sep=""), width = 250, height = 150, units = "mm")
+}
+hpon3_merge <- merge(hpon3_list[[1]], c(hpon3_list[2:length(hpon3_list)]))
+saveRDS(hpon3_merge, paste(RData_dir, "1_hpon3_merge_backup.rds", sep = "")) # save hpon3_merge in a .rds file
+saveRDS(hpon3_list, paste(RData_dir, "1_hpon3_list_backup.rds", sep = "")) # save hpon3_list in a .rds file
+
+
+# ------------------------------ #
+# II. INTEGRATION USING Seurat v4
+# ------------------------------ #
+# First, check the batch effect (thus without integration)
+# run SCTransform on EACH OBJECT SEPERATELY ####
+for (i in 1:length(hpon3_list)) {
+  hpon3_merge[[i]] <- SCTransform(hpon3_merge[[i]], variable.features.n = 3000, verbose = FALSE)
+}
+hpon3_merge <- RunPCA(object = hpon3_list, features = VariableFeatures(object = hpon3_merge), verbose = T)
+p1 <- DimPlot(hpon3_merge, reduction = "pca", group.by = "orig.ident", pt.size = 0.1)
+p2 <- VlnPlot(hpon3_merge, features = "PC_1", group.by = "orig.ident", pt.size = 0.1)
+plot_grid(p1, p2, ncol = 2, rel_widths = c(1, 1.5)) %>% ggsave(filename = paste(figure_dir, "2_hpon3_merge_check_PCA.png", sep=""), width = 500, height = 150, units = "mm")
+# ------------------------------ #
+# Preparation
+for (i in 1:length(hpon3_list)) {
+  hpon3_list[[i]] <- SCTransform(hpon3_list[[i]], variable.features.n = 3000, verbose = FALSE)
+  DefaultAssay(hpon3_list[[i]]) <- "SCT"
+  hpon3_list[[i]] <- RunPCA(hpon3_list[[i]], features = VariableFeatures(hpon3_list[[i]]), assay = "SCT", npcs = 50, verbose = T)
+}
+# Selecting features for downstream integration ####
+integration_features <- SelectIntegrationFeatures(object.list = hpon3_list, nfeatures = 3000)
+hpon3_list <- PrepSCTIntegration(object.list = hpon3_list, anchor.features = integration_features, verbose = F)
+# Anchor identification and integration ####
+hpon3_anchors <- FindIntegrationAnchors(object.list = hpon3_list, normalization.method = "SCT", anchor.features = integration_features, verbose = F)
+saveRDS(hpon3_anchors, paste(RData_dir, "2_hpon3_anchors_backup.rds", sep = ""))
+saveRDS(hpon3_list, paste(RData_dir, "2_hpon3_list_backup.rds", sep = "")) 
+hpon3_integrated <- IntegrateData(anchorset = hpon3_anchors, normalization.method = "SCT", 
+                                   new.assay.name = "seurat.integration", verbose = F)
+# After integration the RNA and SCT slot no longer contain variable or SCTransformned data, so re-analyze enabling visualization
+# Change default assay to RNA, save information in the "RNA" assay
+DefaultAssay(object = hpon3_integrated) <- "RNA"
+# Find variable features and save them in the RNA assay slot
+hpon3_integrated <- FindVariableFeatures(object = hpon3_integrated, selection.method = "vst", nfeatures = 3000, assay = "RNA")
+# Identify the 10 most highly variable genes
+top10 <- head(x = VariableFeatures(object = hpon3_integrated), 10)
+# Ploting variable features with and without labels
+p1 <- VariableFeaturePlot(object = hpon3_integrated, pt.size = 2)
+p1
+LabelPoints(plot = p1, points = top10, repel = F)
+p1 > ggsave(filename = paste(figure_dir, "2_", hpon3_names[[i]], "_hpon3_VariableFeaturePlot.png", sep=""), width = 250, height = 150, units = "mm")
+# Check data
+head(x = colnames(x = hpon3_integrated))
+tail(x = colnames(x = hpon3_integrated))
+unique(x = sapply(X = strsplit(x = colnames(x = hpon3_integrated), split = "_"), FUN = "[", 1))
+table(hpon3_integrated$orig.ident)
+# Change default assay to integrated, save information in the "integrated" assay
+DefaultAssay(object = hpon3_integrated) <- "integrated"
+saveRDS(hpon3_integrated, paste(RData_dir, "2_hpon3_integrated_backup.rds", sep = ""))
+# PCA analysis data will be stored in the "reductions' slot
+hpon3_integrated <- RunPCA(object = hpon3_integrated, features = VariableFeatures(object = hpon3_integrated))
+# Examine and visualize PCA results a few different ways
+print(x = hpon3_integrated[["pca"]], dims = 1:5, nfeatures = 5)
+VizDimLoadings(object = hpon3_integrated, dims = 1:2, reduction = "pca")
+DimPlot(object = hpon3_integrated, reduction = "pca")
+DimHeatmap(object = hpon3_integrated, dims = 1, cells = 500, balanced = TRUE)
+DimHeatmap(object = hpon3_integrated, dims = 1:15, cells = 500, balanced = TRUE)
+# Elbow plot to select how PC we use in the analysis
+ElbowPlot(object = hpon3_integrated) %>% ggsave(filename = paste(figure_dir, "2_hpon3_integrated_check_PCA_dims_ElbowPlot.png", sep=""), width = 150, height = 150, units = "mm")
+# Clustering
+hpon3_integrated <- FindNeighbors(object = hpon3_integrated, dims = 1:13)
+hpon3_integrated <- FindClusters(object = hpon3_integrated, resolution = c(0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6)
+# Cluster-tree analysis, looking appropriate non-anomalous clustering resolution 
+clustree(hpon3_integrated, prefix = "integrated_snn_res.") %>% ggsave(filename = paste(figure_dir, "2_hpon3_integrated_clustree.png", sep=""), width = 150, height = 150, units = "mm")
+# Based of clustree assessment choose res = 0.3, stable yet biologically relevant
+# Beyond 0.3 massive cluster destabilization occurs
+hpon3_integrated <- FindClusters(hpon3_integrated, resolution = 0.3)
+
+
+# ------------------------------ #
+# NON-LINEAR DIMENSIONALITY REDUCTION
+# ------------------------------ #
+# RunUMAP
+# reticulate::py_install(packages = 'umap-learn')
+hpon3_integrated <- RunUMAP(hpon3_integrated, dims = 1:20, metric = 'cosine', umap.method = 'uwot')
+
+# Visualization
+# Note: you can set `label = TRUE` or use the LabelClusters function to help label
+DimPlot(hpon3_integrated, pt.size = 0.5) %>% ggsave(filename = paste(figure_dir, "2_hpon3_integrated_DimPlot.png", sep=""), width = 150, height = 150, units = "mm")
+DimPlot(hpon3_integrated, pt.size = 0.5, split.by = "orig.ident") %>% ggsave(filename = paste(figure_dir, "2_hpon3_integrated_DimPlot_OrigIdent.png", sep=""), width = 150, height = 150, units = "mm")
+DimPlot(hpon3_integrated, pt.size = 0.5, reduction = "pca") %>% ggsave(filename = paste(figure_dir, "2_hpon3_integrated_DimPlot_PCA.png", sep=""), width = 150, height = 150, units = "mm")
+table(hpon3_integrated$seurat_clusters)
+n_cells <- FetchData(hpon3_integrated, 
+                     vars = c("ident", "orig.ident")) %>%
+  dplyr::count(ident, orig.ident) %>%
+  tidyr::spread(ident, n)
+View(n_cells)
+write.table(n_cells, paste(reports_dir, "2_hpon3_integrated_Cells_for_cluster.csv", sep=""), sep=",") # export sample characteristics as a table
+
+
+# ------------------------------ #
+# Cell-Cycle Scoring
+# ------------------------------ #
+# A list of cell cycle markers, from Tirosh et al, 2015, is loaded with Seurat.  We can
+# segregate this list into markers of G2/M phase and markers of S phase
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes
+# Assign Cell-Cycle Scores
+hpon3_integrated_cellcycle <- CellCycleScoring(hpon3_integrated, s.features = s.genes, g2m.features = g2m.genes, set.ident = TRUE)
+# view cell cycle scores and phase assignments
+head(hpon3_integrated_cellcycle[[]])
+# Visualize the distribution of cell cycle markers across
+RidgePlot(hpon3_integrated_cellcycle, features = c("TOP2A", "MKI67")) %>% ggsave(filename = paste(figure_dir, "2_hpon3_integrated_CellCycle.png", sep=""), width = 150, height = 150, units = "mm")
+# Running a PCA on cell cycle genes reveals, unsurprisingly, that cells separate entirely by
+# phase
+hpon3_integrated_cellcycle <- RunPCA(hpon3_integrated_cellcycle, features = c(s.genes, g2m.genes))
+DimPlot(hpon3_integrated_cellcycle, pt.size = 0.5, order = "G1") %>% ggsave(filename = paste(figure_dir, "2_hpon3_integrated_DimPlot_CellCycle.png", sep=""), width = 150, height = 150, units = "mm")
+table(hpon3_integrated_cellcycle$Phase)
+write.table(hpon3_integrated_cellcycle$phase, paste(reports_dir, "2_hpon3_integrated_CellsCycle.csv", sep=""), sep=",") # export sample characteristics as a table
+
+
+# ------------------------------ #
+# Visual interpretation
+# ------------------------------ #
+# Change default assay to RNA, to visualize data on graph
+# You can toggle between integrated, SCT and RNA to see different expression profiles/different normalizations
+DefaultAssay(object = hpon3_integrated) <- "RNA"
+# You can look at the expression of a particular gene across an entire data set here
+# Featureplot
+FeaturePlot(hpon3_integrated, features = c("KRT19"), pt.size = NULL, raster.dpi = c(1024, 1024), cols = c("lightblue", "red2")) %>% ggsave(filename = paste(figure_dir, "2_hpon3_integrated_FeaturePlot_KRT19.png", sep=""), width = 150, height = 150, units = "mm")
+
+
+# ------------------------------ #
+# DIFFERENTIALLY EXPRESSED-GENE ANALYSIS
+# ------------------------------ #
+# Find markers for every cluster compared to all remaining cells, report only the positive ones
+# Here we define a DE gene as a gene which has: Fold Change of >1.5
+hpon3_integrated.sct <- PrepSCTFindMarkers(hpon3_integrated)
+hpon3_integrated.markers <- FindAllMarkers(object = hpon3_integrated.sct, only.pos = TRUE, logfc.threshold = 0.41, slot = 'data', test.use = 'wilcox', assay = 'SCT')
+hpon3_integrated.markers %>% group_by(cluster) %>% top_n(n = 10, wt = avg_log2FC) -> top10
+write.table(hpon3_integrated.markers, reports_dir, "2_hpon3_clusters_markers_allcells_csv", sep=""), sep=",") # export gene differentially expressed
+DoHeatmap(object = hpon3_integrated.sct, features = top10$gene, disp.min = -2.5, 
+          disp.max = 2.5,
+          label = FALSE) + scale_fill_gradientn(colors = colorRampPalette(c("#0200ad", "#fbfcbd", "#ff0000"))(256)) %>% ggsave(filename = paste(figure_dir, "2_hpon3_integrated_Heatmap.png", sep=""), width = 150, height = 150, units = "mm")
+
+
+# ------------------------------ #
+# Sub-clustering ductal cells
+# ------------------------------ #
+object <- RenameIdents(object = hpon3_integrated,  '0' = 'Ductal', '1' = 'Ductal', '2' = 'Ductal', '3' = 'Cycling', '4' = 'Cycling', '5' = 'Ductal')
+DimPlot(object, pt.size = 2) %>% ggsave(filename = paste(figure_dir, "2_hpon3_integrated_DimPlot_RenamedIdents.png", sep=""), width = 150, height = 150, units = "mm")
+duct <- subset(x = hpon3_integrated, idents = c("Ductal"))
+saveRDS(duct, paste(RData_dir, "2_hpon3_integrated_duct.rds", sep = "")) 
+
+
+# CODE END ####
